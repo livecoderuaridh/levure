@@ -65,10 +65,13 @@ If `pSimulator` has a valid value then
 Returns: Empty
 
 */
+local sProfile
 command packagerPackageApplication pStandaloneStackFilename, pBuildProfile, pSimulator
   local tError, tBuildProfile, tBuildStandalone, tStandaloneBuilderPlatforms
   local tSubFolder, tOutputFolder, tAppFolder, tPlatformFilter
   local tHideConsole
+
+  put pBuildProfile into sProfile
 
   put the hideConsoleWindows into tHideConsole
   set the hideConsoleWindows to true
@@ -313,7 +316,94 @@ command packagerPackageApplication pStandaloneStackFilename, pBuildProfile, pSim
   send "packagerDidFinishPackagingApplication pStandaloneStackFilename, tBuildProfile, pSimulator" to stack pStandaloneStackFilename in 10 milliseconds
 
   set the hideConsoleWindows to tHideConsole
+
+  -- Create a local HTTP server using the HTTPd library,
+  -- build the HTML 5 standalone then launch the local URL
+  -- for the standalone in the chosen browser.
+  --
+  if pSimulator is "emscripten" then
+    put empty into tError
+    constant kPort = 55541
+
+    if kPort is not among the lines of the openSockets then
+      httpdStop kPort
+    end if
+
+    local tPort
+      httpdStart "deployEmscriptenNewHTTPRequest", kPort
+      put it into tPort
+
+      //Not sure why but without this answer, the sProfile loses its value when we hit deployEmscriptenNewHTTPRequest
+      answer "http://localhost:" & tPort & slash & levureStandaloneStackName() & ".html"
+      launch URL ("http://localhost:" & tPort & slash & levureStandaloneStackName() & ".html")
+  end if
 end packagerPackageApplication
+
+on deployEmscriptenNewHTTPRequest pSocketID, pRequest
+  local tPath
+  set the itemDel to slash
+  repeat for each item tSubPath in pRequest["resource"]
+     if tPath is not empty then
+        put slash after tPath
+     end if
+     put urlDecode(tSubPath) after tPath
+  end repeat
+  set the itemDel to comma
+
+  local tSubFolder, tFolder
+  put levureAppGet("version") & "-" & levureAppGet("build") into tSubFolder
+  put levureBuildFolder() & "/" & sProfile & "/" & tSubFolder & "/emscripten" into tFolder
+  put tFolder & slash before tPath
+
+  local tMimeType
+  if tPath ends with ".html" then
+     put "text/html" into tMimeType
+  else if tPath ends with ".js" then
+     put "text/javascript" into tMimeType
+  else if tPath ends with ".wasm" then
+     put "application/wasm" into tMimeType
+  end if
+
+  local tResponseHeaders
+  if tMimeType is not empty then
+     put "Content-Type:" && tMimeType & return after tResponseHeaders
+  end if
+
+  if there is a file tPath then
+     httpdResponse pSocketID, 200, URL ("binfile:" & tPath), tResponseHeaders
+  else
+     set the itemDel to slash
+     if the last item pRequest["resource"] is "stdio.html" and pRequest["method"] is "POST" then
+        local tContent
+        put urlDecode(pRequest["content"]) into tContent
+
+        -- Parse and display emscripten log messages in the message box.
+        -- Log messages from emscripten appear to be of the form
+        -- ^<err|out|pageload|exit>^[count^]<message>
+        -- Output a message header then the message body itself
+        local tMsgType, tMsgTypeCount, tMsgBody
+        put item 2 to -2 of pRequest["resource"] after msg
+        if matchText(tContent, "^\^(.+)\^([0-9]+)\^(.*)$", tMsgType, tMsgTypeCount, tMsgBody) then
+           put " -" && tMsgType && "#" & tMsgTypeCount & return after msg
+           if tMsgBody is not empty then
+              put tMsgBody & return after msg
+           end if
+        else if matchText(tContent, "^\^(.+)\^(.*)$", tMsgType, tMsgBody) then
+           put " -" && tMsgType & return after msg
+           if tMsgBody is not empty then
+              put tMsgBody & return after msg
+           end if
+        else
+           put tContent & return after msg
+        end if
+
+        httpdResponse pSocketID, 200
+     else
+        httpdResponse pSocketID, 404
+     end if
+     set the itemDel to comma
+  end if
+end deployEmscriptenNewHTTPRequest
 
 
 private command _determineSigningCertificate pBuildProfile, pPlatform, @xAppA
